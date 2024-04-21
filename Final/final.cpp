@@ -23,21 +23,15 @@ DWORD findProcessByName(LPCWSTR targetName) {
 		}
 
 		if (wcscmp(name, targetName) == 0) {
+			free(name);
 			CloseHandle(curProcess);
 			return processList[i];
 		}
 
 		CloseHandle(curProcess);
 	}
-
+	free(name);
 	return NULL;
-}
-
-BYTE* convertStringToBytes(const char* chars) {
-	BYTE bytes[32];
-	for (int i = 0; i < 32; i++)
-		bytes[i] = strtol(chars, nullptr, 16);
-	return bytes;
 }
 
 int checkHash(BYTE* needsToCheck) {
@@ -62,18 +56,32 @@ int checkHash(BYTE* needsToCheck) {
 		}
 		flag = 1;
 	}
-
+	
 	return 0;
 }
 
-int checkThread(DEBUG_EVENT event, DWORD pid) {
+int checkForBytes(BYTE* needsToCheck, DWORD length) {
+	std::ifstream bytes_file("bytes", std::ios::binary);
+	std::string curBins;
+	int curPos;
+
+	while (std::getline(bytes_file, curBins)) {
+		for (curPos = 0; curPos < length - curBins.length(); curPos++) {
+			if (strncmp(curBins.c_str(), reinterpret_cast<const char*>(needsToCheck + curPos), curBins.length()) == 0) {
+				return 1;
+			}
+			//if("\xac\x1c\x25\xad", curPos()
+		}
+	}
+	return 0;
+}
+
+int checkThread(DEBUG_EVENT event, DWORD pid, DWORD hashBased) {
 	HCRYPTPROV provider;
 	HCRYPTHASH hash;
 	BYTE result[33];
-	char stringVersion[33];
 	DWORD len = 33;
 	MEMORY_BASIC_INFORMATION memInfo;
-	BYTE* determineSize;
 	SIZE_T sizeofThread = 0;
 	DWORD read_write = 0x02, old = 0x0;
 	BYTE* virusCheck;
@@ -89,26 +97,36 @@ int checkThread(DEBUG_EVENT event, DWORD pid) {
 		printf("WARNING:Found thread with suspicious access permisions: read, write, and execute.\n");
 	}
 	virusCheck = (BYTE*)malloc(sizeof(byte) * memInfo.RegionSize);
-	if (NULL == virusCheck)
+	if (NULL == virusCheck) {
+		CloseHandle(process);
 		return -1;
+	}
 
 	ReadProcessMemory(process, memInfo.AllocationBase, virusCheck, memInfo.RegionSize, &sizeofThread);
 
 	while (virusCheck[sizeofThread-1] == 0 && sizeofThread > 0) sizeofThread--;
 
-	CryptAcquireContext(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT);
-	CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash);
-	CryptHashData(hash, virusCheck, sizeofThread, 0); // 1 should be the length of bytes to hash
-	CryptGetHashParam(hash, HP_HASHVAL, result, &len, 0);
-	CryptDestroyHash(hash);
-	CryptReleaseContext(provider, 0); 
-	VirtualProtectEx(process, event.u.CreateThread.lpStartAddress, memInfo.RegionSize, old, &read_write); // Fix permissions
-	CloseHandle(process);
-	return checkHash(result);
+	if (hashBased) {
+		CryptAcquireContext(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT);
+		CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash);
+		CryptHashData(hash, virusCheck, (DWORD)sizeofThread, 0); // 1 should be the length of bytes to hash
+		CryptGetHashParam(hash, HP_HASHVAL, result, &len, 0);
+		CryptDestroyHash(hash);
+		CryptReleaseContext(provider, 0);
+		VirtualProtectEx(process, event.u.CreateThread.lpStartAddress, memInfo.RegionSize, old, &read_write); // Fix permissions
+		CloseHandle(process);
+		free(virusCheck);
+		return checkHash(result);
+	}
+	else {
+		CloseHandle(process);
+		DWORD retVal = checkForBytes(virusCheck, sizeofThread);
+		free(virusCheck);
+		return retVal;
+	}
 }
 
 void KillChildren(DWORD processPid) {
-	DWORD otherBytesNeeded;
 	LPWSTR name = (LPWSTR)malloc(sizeof(wchar_t) * 1024);
 	HANDLE killMe;
 	HANDLE snap32 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -127,39 +145,41 @@ void KillChildren(DWORD processPid) {
 			}
 		} while (Process32Next(snap32, &curProcess));
 	}
+	free(name);
+	CloseHandle(snap32);
 }
 
-int scanAllProcesses(void) {
+int scanAllProcesses(DWORD checkHashes) {
 	DWORD processList[1024], bytesNeeded, numOfProcess;
-	HANDLE curProcess;
-	HMODULE moduleHolder;
-	DWORD otherBytesNeeded;
 	DWORD processPid;
-	DEBUG_EVENT debugEvent;
 	HANDLE injectedProcess;
-
-	LPWSTR name = (LPWSTR)malloc(sizeof(wchar_t) * 1024);
+	DWORD myPid = GetCurrentProcessId();
+	DEBUG_EVENT debugEvent;
 
 	EnumProcesses(processList, sizeof(processList), &bytesNeeded);
 	numOfProcess = bytesNeeded / sizeof(DWORD);
 
+
 	for (DWORD i = 0; i < numOfProcess; i++) {
 		processPid = processList[i];
+		if(processPid == myPid)
+			continue;
 		if (!DebugActiveProcess(processPid)) {
 			printf("Can't attach to the process with pid %d, try running at a higher privilege?\n", processPid);
 			continue;
 		}
-		printf("Attached!\n");
+		printf("Attached to %d!\n", processPid);
 		printf("Watching for new threads...\n");
 		while (true) {
-			if (!WaitForDebugEvent(&debugEvent, 500)) {
+
+			if (!WaitForDebugEvent(&debugEvent, 0)) {
 				DebugActiveProcessStop(processPid);
 				break;
 			}
 
 			if (debugEvent.dwDebugEventCode == CREATE_THREAD_DEBUG_EVENT) {
 				printf("New thread found with id: %d!\nChecking...\n", debugEvent.dwThreadId);
-				if (checkThread(debugEvent, processPid) == 1) {
+				if (checkThread(debugEvent, processPid, checkHashes) == 1) {
 					printf("Malicious thread found in process %d with thread id %d!\n", processPid, debugEvent.dwThreadId);
 					printf("Killing...\n");
 					injectedProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processPid);
@@ -168,11 +188,11 @@ int scanAllProcesses(void) {
 					TerminateProcess(injectedProcess, -1);
 					CloseHandle(injectedProcess);
 					printf("Killed!\nGoodbye!\n");
+					ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
 					continue;
 				}
 				printf("Clean!\n");
 				ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
-				printf("Watching for new threads...\n");
 				continue;
 			}
 			else {
@@ -186,23 +206,37 @@ int scanAllProcesses(void) {
 
 int main() {
 	LPCWSTR args = GetCommandLine();
+	wchar_t* filename = (wchar_t*)malloc(sizeof(WCHAR) * 1024);
 	DWORD processPid;
 	HANDLE injectedProcess;
 	DEBUG_EVENT debugEvent;
-	DWORD count = 0;
-
+	DWORD count = 0, length = 0;
+	DWORD checkHashes = 1;
+	ZeroMemory(filename, sizeof(WCHAR) * 1024);
 
 	while (NULL != *args && *args != L' ') args++; // Get past name of executable
 	while (NULL != *args && *args == L' ') args++; // Get first executable name
-	if (NULL == *args) {
-		printf("Usage final.exe [ name of the exectuable | all ]\n");
+	if (NULL == *args || wcsncmp(L"/h", args, 2) == 0) {
+		printf("Usage final.exe [/b] [ name of the exectuable | all ]\n");
 		exit(-1);
 	}
+	while (NULL != *args && *args == L' ') args++;
+	if (*args == L'/') {
+		if (*(args + 1) == L'b')
+			checkHashes = 0;
+		else {
+			printf("Usage final.exe [/b] [ name of the exectuable | all ]\n");
+			exit(-1);
+		}
+		args += 2;
+		while (NULL != *args && *args == L' ') args++;
+	}
 
+	if (wcsncmp(L"all", args, 3) == 0)
+		exit(scanAllProcesses(checkHashes));
 	printf("Searching for executable...\n");
-	if (wcscmp(L"all", args))
-		exit(scanAllProcesses());
 
+	printf("%ls\n", args);
 	if (NULL == (processPid = findProcessByName(args))) {
 		printf("Process not found...\nExiting\n");
 		exit(-1);
@@ -213,6 +247,7 @@ int main() {
 		printf("Can't attach to the process, try running at a higher privilege?\n");
 		exit(-1);
 	}
+
 	printf("Attached!\n");
 	printf("Watching for new threads...\n");
 	while (true) {
@@ -223,7 +258,7 @@ int main() {
 
 		if (debugEvent.dwDebugEventCode == CREATE_THREAD_DEBUG_EVENT) {
 			printf("New thread found with id: %d!\nChecking...\n", debugEvent.dwThreadId);
-			if (checkThread(debugEvent, processPid) == 1) {
+			if (checkThread(debugEvent, processPid, checkHashes) == 1) {
 				printf("Malicious thread found in process %d with thread id %d!\n", processPid, debugEvent.dwThreadId);
 				printf("Killing...\n");
 				injectedProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processPid);
