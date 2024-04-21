@@ -35,7 +35,7 @@ DWORD findProcessByName(LPCWSTR targetName) {
 }
 
 int checkHash(BYTE* needsToCheck) {
-	std::ifstream hashes_file("hashes", std::ios::binary);
+	std::ifstream hashes_file(HASHES_FILE, std::ios::binary);
 	std::string curHash;
 	int flag = 1;
 	while (std::getline(hashes_file, curHash)) {
@@ -61,7 +61,7 @@ int checkHash(BYTE* needsToCheck) {
 }
 
 int checkForBytes(BYTE* needsToCheck, DWORD length) {
-	std::ifstream bytes_file("bytes", std::ios::binary);
+	std::ifstream bytes_file(SIGNATURE_FILE, std::ios::binary);
 	std::string curBins;
 	int curPos;
 

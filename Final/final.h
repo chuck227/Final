@@ -12,3 +12,4 @@
 #include <fstream>
 
 #define HASHES_FILE "./hashes"
+#define SIGNATURE_FILE "./bytes"
