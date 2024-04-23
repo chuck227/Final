@@ -127,7 +127,6 @@ int checkThread(DEBUG_EVENT event, DWORD pid, DWORD hashBased) {
 }
 
 void KillChildren(DWORD processPid) {
-	LPWSTR name = (LPWSTR)malloc(sizeof(wchar_t) * 1024);
 	HANDLE killMe;
 	HANDLE snap32 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if (snap32 == INVALID_HANDLE_VALUE)
@@ -145,8 +144,37 @@ void KillChildren(DWORD processPid) {
 			}
 		} while (Process32Next(snap32, &curProcess));
 	}
-	free(name);
 	CloseHandle(snap32);
+}
+
+DWORD getParentPid(DWORD pid) {
+	HANDLE snap32 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	PROCESSENTRY32 curProcess = { 0 };
+
+	if (Process32First(snap32, &curProcess)) {
+		do {
+			if (curProcess.th32ProcessID == pid) {
+				return curProcess.th32ParentProcessID;
+			}
+		} while (Process32Next(snap32, &curProcess));
+	}
+	return pid;
+}
+
+DWORD isChild(DWORD pid, DWORD parentPid) {
+	HANDLE snap32 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	PROCESSENTRY32 curProcess = { 0 };
+
+	if (Process32First(snap32, &curProcess)) {
+		do {
+			if (curProcess.th32ProcessID == pid) {
+				if(curProcess.th32ParentProcessID == parentPid)
+					return curProcess.th32ParentProcessID;
+				return 0;
+			}
+		} while (Process32Next(snap32, &curProcess));
+	}
+	return 0;
 }
 
 int scanAllProcesses(DWORD checkHashes) {
@@ -154,6 +182,7 @@ int scanAllProcesses(DWORD checkHashes) {
 	DWORD processPid;
 	HANDLE injectedProcess;
 	DWORD myPid = GetCurrentProcessId();
+	DWORD parentPid = getParentPid(myPid);
 	DEBUG_EVENT debugEvent;
 
 	EnumProcesses(processList, sizeof(processList), &bytesNeeded);
@@ -162,8 +191,11 @@ int scanAllProcesses(DWORD checkHashes) {
 
 	for (DWORD i = 0; i < numOfProcess; i++) {
 		processPid = processList[i];
-		if(processPid == myPid)
+		if(processPid == myPid || processPid == parentPid || isChild(processPid, parentPid))
 			continue;
+		printf("Attaching to %d...\n", processPid);
+		fflush(stdout);
+
 		if (!DebugActiveProcess(processPid)) {
 			printf("Can't attach to the process with pid %d, try running at a higher privilege?\n", processPid);
 			continue;
@@ -178,7 +210,7 @@ int scanAllProcesses(DWORD checkHashes) {
 			}
 
 			if (debugEvent.dwDebugEventCode == CREATE_THREAD_DEBUG_EVENT) {
-				printf("New thread found with id: %d!\nChecking...\n", debugEvent.dwThreadId);
+				//printf("New thread found with id: %d!\nChecking...\n", debugEvent.dwThreadId);
 				if (checkThread(debugEvent, processPid, checkHashes) == 1) {
 					printf("Malicious thread found in process %d with thread id %d!\n", processPid, debugEvent.dwThreadId);
 					printf("Killing...\n");
@@ -188,10 +220,11 @@ int scanAllProcesses(DWORD checkHashes) {
 					TerminateProcess(injectedProcess, -1);
 					CloseHandle(injectedProcess);
 					printf("Killed!\nGoodbye!\n");
-					ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
-					continue;
+					exit(0);
+					// continue;
+					// ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
 				}
-				printf("Clean!\n");
+				//printf("Clean!\n");
 				ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
 				continue;
 			}
@@ -278,5 +311,6 @@ int main() {
 			ContinueDebugEvent(processPid, debugEvent.dwThreadId, DBG_EXCEPTION_HANDLED);
 		}
 	}
+	return 0;
 	return 0;
 }
